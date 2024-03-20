@@ -1043,7 +1043,7 @@ int munmap(void* addr, size_t length) {
                             void** section = &(**map)._64_kb_sections[idx];
 #else
                         for (size_t idx = (**map)._64_kb_sections.size - 1; idx != -1; idx--) {
-                            struct LIBMMAP__MAP_INFO** map = &(**map)._64_kb_sections.vec[idx];
+                            void** section = &(**map)._64_kb_sections.vec[idx];
 #endif
                             LIBMMAP_DEBUG_PRINTF("            considering section 0x%p\n", *section);
                             if (*section != nullptr) {

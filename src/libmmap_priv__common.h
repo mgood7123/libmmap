@@ -36,7 +36,7 @@ struct LIBMMAP__MAP_INFO {
 #else
 #define VECTOR_TYPE struct LIBMMAP__MAP_INFO*
 #define VECTOR_PREFIX libmmap_info_vector
-#include <sys/libmmap_priv__cvector.h>
+#include "libmmap_priv__cvector.h"
 #endif
 
 
