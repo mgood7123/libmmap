@@ -2,27 +2,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <errno.h>
 
-// mingw
-#ifdef __MINGW__
-    #if !defined(_OFF_T_) && (!defined(_FILE_OFFSET_BITS_SET_OFFT) && !(!defined(NO_OLDNAMES) || defined(POSIX)))
-        #ifdef __USE_FILE_OFFSET64
-            typedef int64_t off_t;
-        #else
-            typedef int32_t off_t;
-        #endif
-    #endif
-#else
-// CRT
-    #ifdef _OFF_T_DEFINED
-        #if (defined _CRT_DECLARE_NONSTDC_NAMES && _CRT_DECLARE_NONSTDC_NAMES) || (!defined _CRT_DECLARE_NONSTDC_NAMES && !__STDC__)
-        #else
-            #ifdef __USE_FILE_OFFSET64
-                typedef int64_t off_t;
-            #else
-                typedef int32_t off_t;
-            #endif
-        #endif
+#if !defined(_OFF_T_) && (!defined(_FILE_OFFSET_BITS_SET_OFFT) && !(!defined(NO_OLDNAMES) || defined(_POSIX))) && (defined(_OFF_T_DEFINED) && !(defined _CRT_DECLARE_NONSTDC_NAMES && _CRT_DECLARE_NONSTDC_NAMES) || (!defined _CRT_DECLARE_NONSTDC_NAMES && !__STDC__))
+    #ifdef __USE_FILE_OFFSET64
+        typedef int64_t off_t;
+    #else
+        typedef int32_t off_t;
     #endif
 #endif
 
