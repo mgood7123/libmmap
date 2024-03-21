@@ -2,51 +2,11 @@
 #define LIBMMAP__PRIVATE_COMMON__H
 
 #include <wtypes.h>
-
-#ifndef __cplusplus
-# ifndef nullptr
-typedef void* nullptr_t;
-#  define nullptr (nullptr_t)NULL
-# endif
-#endif
-
-
-#if __cplusplus
 #include <vector>
-#else
-#define VECTOR_TYPE void*
-#define VECTOR_PREFIX libmmap_ptr_vector
-#include "libmmap_priv__cvector.h"
-#endif
 
-
-struct LIBMMAP__MAP_INFO {
-    HANDLE file_mapping;
-    void* begin_address;
-    void* end_address;
-#if __cplusplus
-    std::vector<void*> _64_kb_sections;
-#else
-    struct vector_libmmap_ptr_vector _64_kb_sections;
-#endif
-};
-
-
-#if __cplusplus
-#else
-#define VECTOR_TYPE struct LIBMMAP__MAP_INFO*
-#define VECTOR_PREFIX libmmap_info_vector
-#include "libmmap_priv__cvector.h"
-#endif
-
-
-#if __cplusplus
-static std::vector<LIBMMAP__MAP_INFO*> libmmap_mapping_information;
-#else
-static struct vector_libmmap_info_vector libmmap_mapping_information;
-static bool libmmap_mapping_information_initialized = false;
-#endif
-
+#include <sys/libmmap_compile_info.h>
+#include <sys/libmmap_public__common.h>
+#include <sys/mmap_defines.h>
 
 #define roundup(x, y)	((((x) + ((y) - 1)) / (y)) * (y))
 #define rounddown(x, y)	(((x) / (y)) * (y))
@@ -119,5 +79,195 @@ static bool libmmap_mapping_information_initialized = false;
 
 
 #define libmmap____ret(e, val) errno = e; return val
+
+
+
+struct LIBMMAP_SECTION_INFO {
+    HANDLE mapping = INVALID_HANDLE_VALUE;
+    void* address = nullptr;
+    int prot = 0;
+    int flags = 0;
+    DWORD dwFileOffsetHigh = 0;
+    DWORD dwFileOffsetLow = 0;
+    SIZE_T length;
+    libmmap__________________init_error();
+
+    inline bool operator ==(const LIBMMAP_SECTION_INFO & other) const {
+        return other.address == address;
+    }
+
+    inline bool operator !=(const LIBMMAP_SECTION_INFO& other) const {
+        return other.address != address;
+    }
+
+    inline void prepare (
+        HANDLE mapping,
+        void* address,
+        int flags,
+        DWORD dwFileOffsetHigh,
+        DWORD dwFileOffsetLow,
+        SIZE_T length
+    ) {
+        this->mapping = mapping;
+        this->address = address;
+        this->flags = flags;
+        this->dwFileOffsetHigh = dwFileOffsetHigh;
+        this->dwFileOffsetLow = dwFileOffsetLow;
+        this->length = length;
+        LIBMMAP_DEBUG_PRINTF("attempting to create a %s file section mapping\n", PROT_TO_FILE_MAP_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
+    }
+
+    inline bool map(int prot) {
+        this->prot = prot;
+        if (prot == PROT_NONE) return true;
+        void * result = MapViewOfFileEx(
+              mapping
+            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+            , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+            , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+            , length // SIZE_T, length, can be anything
+            , address // MUST be a multiple of granularity
+        );
+        libmmap__________________save_error();
+        bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+        libmmap__________________restore_error();
+        return !e;
+    }
+
+    inline bool remap(int prot) {
+        // cannot remap an unmapped address
+        if (!address) return false;
+        if (!UnmapViewOfFile(address)) return false;
+        this->prot = prot;
+        if (prot == PROT_NONE) return true;
+        void* result = MapViewOfFileEx(
+            mapping
+            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+            , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+            , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+            , length // SIZE_T, length, can be anything
+            , address // MUST be a multiple of granularity
+        );
+        libmmap__________________save_error();
+        bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+        libmmap__________________restore_error();
+        return !e;
+    }
+
+    inline bool unmap() {
+        if (address) {
+            if (prot == PROT_NONE) {
+                address = nullptr;
+                return true;
+            }
+            else {
+                bool r = UnmapViewOfFile(address);
+                address = nullptr;
+                return r;
+            }
+        }
+        return true;
+    }
+};
+
+struct FileMapping {
+    std::vector<LIBMMAP_SECTION_INFO> _64_kb_sections;
+    HANDLE result = INVALID_HANDLE_VALUE;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    SECURITY_ATTRIBUTES fileMappingAttributes;
+    int prot = PROT_NONE;
+    int flags = 0;
+    DWORD dwMaximumSizeHigh = 0;
+    DWORD dwMaximumSizeLow = 0;
+
+    inline bool create(
+        HANDLE hFile, SECURITY_ATTRIBUTES fileMappingAttributes,
+        int prot, int flags,
+        DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow
+    ) {
+        this->hFile = hFile;
+        this->fileMappingAttributes = fileMappingAttributes;
+        this->prot = prot;
+        this->flags = flags;
+        this->dwMaximumSizeHigh = dwMaximumSizeHigh;
+        this->dwMaximumSizeLow = dwMaximumSizeLow;
+        LIBMMAP_DEBUG_PRINTF("attempting to create a %s file mapping\n", PROT_TO_PAGE_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
+        result = CreateFileMappingW(hFile, &fileMappingAttributes, PROT_TO_PAGE(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE), dwMaximumSizeHigh, dwMaximumSizeLow, NULL);
+        return result;
+    }
+
+    inline bool destroy() {
+        if (result != INVALID_HANDLE_VALUE) {
+            bool r = CloseHandle(result);
+            result = INVALID_HANDLE_VALUE;
+            return r;
+        }
+        return true;
+    }
+
+    inline bool prepare(
+        HANDLE mapping,
+        void* address,
+        int flags,
+        DWORD dwFileOffsetHigh,
+        DWORD dwFileOffsetLow,
+        SIZE_T length
+    ) {
+        LIBMMAP_SECTION_INFO section;
+        section.prepare(mapping, address, flags, dwFileOffsetHigh, dwFileOffsetLow, length);
+        try {
+            _64_kb_sections.emplace_back(section);
+        }
+        catch (std::bad_alloc) {
+            return false;
+        }
+        return true;
+    }
+
+    inline LIBMMAP_SECTION_INFO * find(void* address) {
+        for (LIBMMAP_SECTION_INFO& s : _64_kb_sections) {
+            if (s.address == address) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+};
+
+struct ReservedVirtualMemory {
+    void* result = nullptr;
+    void* addr = nullptr;
+    SIZE_T length = 0;
+    inline bool create(void* addr, SIZE_T length) {
+        this->addr = addr;
+        this->length = length;
+        result = VirtualAlloc(addr, length, MEM_RESERVE, PAGE_NOACCESS);
+        return result;
+    }
+    inline bool destroy() {
+        if (result) {
+            bool r = VirtualFree(result, 0, MEM_RELEASE);
+            result = nullptr;
+            return r;
+        }
+        return true;
+    }
+};
+
+struct LIBMMAP__MAP_INFO {
+    FileMapping mapping;
+    void* begin_address;
+    void* end_address;
+
+    inline bool operator ==(const LIBMMAP__MAP_INFO& other) const {
+        return other.begin_address == begin_address;
+    }
+
+    inline bool operator !=(const LIBMMAP__MAP_INFO& other) const {
+        return other.begin_address == begin_address;
+    }
+};
+
+static std::vector<LIBMMAP__MAP_INFO> libmmap_mapping_information;
 
 #endif // LIBMMAP__PRIVATE_COMMON__H

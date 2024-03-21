@@ -15,7 +15,7 @@ set(INSTALL_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib" CACHE PATH "Installation direc
 set(INSTALL_INC_DIR "${CMAKE_INSTALL_PREFIX}/include" CACHE PATH "Installation directory for headers")
 
 # Add source to this project's executable.
-add_library (mmap STATIC "src/mmap.c")
+add_library (mmap STATIC "src/mmap.cpp")
 target_include_directories(mmap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_subdirectory(libassert)

@@ -10,25 +10,6 @@
 #include <sys/libmmap_public__common.h>
 #include "libmmap_priv__common.h"
 
-#define FREE_FILE_MAPPING(mapping) \
-if (!CloseHandle(mapping)) { \
-    libmmap__________________save_error(); \
-    print_last_error("failed to close mapping", libmmap__________________last_error); \
-    libmmap__________________restore_error(); \
-    libmmap____ret(-ENOMEM, MAP_FAILED); \
-} \
-mapping = INVALID_HANDLE_VALUE;
-
-#define FREE_VIRTUAL_MEMORY_AND_ON_FAILURE_FREE_FILE_MAPPING(ptr, mapping) \
-if (!VirtualFree(ptr, 0, MEM_RELEASE)) { \
-    libmmap__________________save_error(); \
-    print_last_error("failed to free reserved memory", libmmap__________________last_error); \
-    FREE_FILE_MAPPING(mapping); \
-    libmmap__________________restore_error(); \
-    libmmap____ret(-ENOMEM, MAP_FAILED); \
-} \
-ptr = nullptr;
-
 static CRITICAL_SECTION __libmmap_mapping_information__lock = { 0 };
 static CRITICAL_SECTION * libmmap_mapping_information__lock = nullptr;
 static DWORD granularity;
@@ -109,42 +90,40 @@ static inline void print_last_error(const char* msg, DWORD dwErrorCode) {
     }
 }
 
-void* prepopulate_array(struct LIBMMAP__MAP_INFO* a_map, HANDLE mapping) {
-    libmmap__________________init_error();
-    for (uint8_t* begin = (uint8_t*)a_map->begin_address; begin != a_map->end_address; begin += granularity) {
-        // populate with nullptr
-        intptr_t ri = (intptr_t)nullptr;
-#if __cplusplus
-        a_map->_64_kb_sections.emplace_back((void*)ri);
-#else
-        if (!v_libmmap_ptr_vector_push(&a_map->_64_kb_sections, (void**)&ri)) {
-            libmmap__________________save_error();
+inline bool prepopulate_array(LIBMMAP__MAP_INFO & a_map, off_t offset) {
+    LIBMMAP_DEBUG_PRINTF("mmap: preparing to map range [0x%p-0x%p]\n", a_map.begin_address, a_map.end_address);
+    for (uint8_t* begin = (uint8_t*)a_map.begin_address; begin != a_map.end_address; begin += granularity) {
+        const DWORD dwFileOffsetHigh = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)0 : (DWORD)((offset >> 32) & 0xFFFFFFFFL);
+        const DWORD dwFileOffsetLow = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)offset : (DWORD)(offset & 0xFFFFFFFFL);
 
-            print_last_error("failed to reallocate sections for a mapping array", libmmap__________________last_error);
-            // lock our dll array
-            EnterCriticalSection(libmmap_mapping_information__lock);
-            v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-            for (void** section = a_map->_64_kb_sections.vec; section <= &a_map->_64_kb_sections.vec[a_map->_64_kb_sections.size-1]; section++) {
-                if (*section != nullptr) {
-                    if (!UnmapViewOfFile(*section)) {
-                        libmmap__________________save_error();
-                        print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                    }
-                    *section = nullptr;
-                }
-            }
-            free(a_map->_64_kb_sections.vec);
-            free(a_map);
-            // unlock our dll array
-            LeaveCriticalSection(libmmap_mapping_information__lock);
-            FREE_FILE_MAPPING(mapping);
-
-            libmmap__________________restore_error();
-            libmmap____ret(-ENOMEM, MAP_FAILED);
+        LIBMMAP_DEBUG_PRINTF("mmap: preparing to map 0x%p\n", begin);
+        if (!a_map.mapping.prepare(a_map.mapping.result, begin, a_map.mapping.flags, dwFileOffsetHigh, dwFileOffsetLow, granularity)) {
+            LIBMMAP_DEBUG_PRINTF("mmap: failed to prepare to map 0x%p\n", begin);
+            return false;
         }
-#endif
+        LIBMMAP_DEBUG_PRINTF("mmap: prepared to map 0x%p\n", begin);
+        offset += granularity;
     }
-    return nullptr;
+    LIBMMAP_DEBUG_PRINTF("mmap: prepared to map range [0x%p-0x%p]\n", a_map.begin_address, a_map.end_address);
+    return true;
+}
+
+int getpagesize(void) {
+    while (!InitOnceExecuteOnce(
+        &g_InitOnce,          // One-time initialization structure
+        InitHandleFunction,   // Pointer to initialization callback function
+        NULL,                 // Optional parameter to callback function (not used)
+        nullptr               // Receives pointer to event object stored in g_InitOnce (not used)
+    )) {}
+    return granularity;
+}
+
+long sysconf(int name) {
+    if (name == _SC_PAGE_SIZE) {
+        return getpagesize();
+    }
+    errno = -EINVAL;
+    return -1;
 }
 
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -560,19 +539,23 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
     a.bInheritHandle = false;
     a.nLength = 0;
     a.lpSecurityDescriptor = nullptr;
-    LIBMMAP_DEBUG_PRINTF("creating %s file mapping\n", PROT_TO_PAGE_STR(prot, (flags& MAP_PRIVATE) == MAP_PRIVATE));
-    HANDLE mapping = CreateFileMappingW(handle, &a, PROT_TO_PAGE(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE), dwMaxSizeHigh, dwMaxSizeLow, NULL);
-    if (!mapping) {
+    FileMapping mapping;
+    if (!mapping.create(
+        handle,
+        a,
+        prot, flags,
+        dwMaxSizeHigh, dwMaxSizeLow
+    )) {
         libmmap__________________save_error();
         print_last_error("failed to create mapping", libmmap__________________last_error);
         libmmap__________________restore_error();
         libmmap____ret(-ENOMEM, MAP_FAILED);
     }
 
-    // mapping can reuse an existing mapping, abort
+    // mapping can reuse an existing mapping, it is unclear if the returned handle is a duplicate
     if (libmmap__________________last_error == ERROR_ALREADY_EXISTS) {
         libmmap__________________save_error();
-        print_last_error("failed to create mapping", libmmap__________________last_error);
+        print_last_error("failed to create mapping (already exists)", libmmap__________________last_error);
         libmmap__________________restore_error();
         libmmap____ret(-EEXIST, MAP_FAILED);
     }
@@ -598,131 +581,70 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
     // and must assume we do not have enough free space left (fragmentation will cause this)
 
     while (true) {
-        // address must be aligned to granularity
-        // length 
-        void* desired_addr_r = VirtualAlloc(addr_adjusted, length, MEM_RESERVE, PAGE_NOACCESS);
-        libmmap__________________save_error();
-        if (!desired_addr_r) {
+        ReservedVirtualMemory mem;
+        if (!mem.create(addr_adjusted, length)) {
+            libmmap__________________save_error();
             print_last_error("failed to reserve memory", libmmap__________________last_error);
-            FREE_FILE_MAPPING(mapping);
+            if (!mapping.destroy()) {
+                libmmap__________________save_error();
+                print_last_error("failed to close mapping", libmmap__________________last_error);
+                libmmap__________________restore_error();
+                libmmap____ret(-ENOMEM, MAP_FAILED);
+            }
             libmmap__________________restore_error();
             libmmap____ret(-ENOMEM, MAP_FAILED);
         }
         // we have managed to reserve an address
         // do any computations now while it is reserved
 
-        // lock our dll array
-        EnterCriticalSection(libmmap_mapping_information__lock);
+        // our array has been created if-needed
 
-#if __cplusplus
-#else
-        if (!libmmap_mapping_information_initialized) {
-            v_libmmap_info_vector_init(&libmmap_mapping_information);
+        LIBMMAP__MAP_INFO a_map;
+
+        a_map.mapping = std::move(mapping);
+        a_map.begin_address = mem.result;
+        a_map.end_address = (uint8_t*)a_map.begin_address + length;
+
+        // pre-populate our array
+        if (!prepopulate_array(a_map, offset)) {
             libmmap__________________save_error();
-            if (!libmmap_mapping_information.vec) {
-                // unlock our dll array
-                LeaveCriticalSection(libmmap_mapping_information__lock);
-
-                print_last_error("failed to create array", libmmap__________________last_error);
-                FREE_VIRTUAL_MEMORY_AND_ON_FAILURE_FREE_FILE_MAPPING(desired_addr_r, mapping);
-                FREE_FILE_MAPPING(mapping);
+            print_last_error("failed to reallocate sections for a mapping array", libmmap__________________last_error);
+            if (!mem.destroy()) {
+                libmmap__________________save_error();
+                print_last_error("failed to free reserved memory", libmmap__________________last_error);
+                if (!a_map.mapping.destroy()) {
+                    libmmap__________________save_error();
+                    print_last_error("failed to close mapping", libmmap__________________last_error);
+                    libmmap__________________restore_error();
+                    libmmap____ret(-ENOMEM, MAP_FAILED);
+                }
                 libmmap__________________restore_error();
                 libmmap____ret(-ENOMEM, MAP_FAILED);
             }
-            libmmap_mapping_information_initialized = true;
-        }
-#endif
-
-        // our array has been created if-needed
-
-#if __cplusplus
-        struct LIBMMAP__MAP_INFO* a_map = new struct LIBMMAP__MAP_INFO();
-#else
-        struct LIBMMAP__MAP_INFO* a_map = (struct LIBMMAP__MAP_INFO*) malloc(sizeof(struct LIBMMAP__MAP_INFO));
-#endif
-        if (!a_map) {
-            libmmap__________________save_error();
-
-            print_last_error("failed to allocate a mapping array", libmmap__________________last_error);
-
-            // unlock our dll array
-            LeaveCriticalSection(libmmap_mapping_information__lock);
-
-            FREE_VIRTUAL_MEMORY_AND_ON_FAILURE_FREE_FILE_MAPPING(desired_addr_r, mapping);
-            FREE_FILE_MAPPING(mapping);
-
+            if (!a_map.mapping.destroy()) {
+                libmmap__________________save_error();
+                print_last_error("failed to close mapping", libmmap__________________last_error);
+                libmmap__________________restore_error();
+                libmmap____ret(-ENOMEM, MAP_FAILED);
+            }
             libmmap__________________restore_error();
             libmmap____ret(-ENOMEM, MAP_FAILED);
         }
-
-        a_map->file_mapping = mapping;
-        a_map->begin_address = desired_addr_r;
-        a_map->end_address = (uint8_t*)desired_addr_r + length;
-#if __cplusplus
-#else
-        v_libmmap_ptr_vector_init(&a_map->_64_kb_sections);
-        if (!a_map->_64_kb_sections.vec) {
-            libmmap__________________save_error();
-            print_last_error("failed to allocate a section array for a mapping array", libmmap__________________last_error);
-
-            // unlock our dll array
-            LeaveCriticalSection(libmmap_mapping_information__lock);
-            free(a_map);
-            FREE_VIRTUAL_MEMORY_AND_ON_FAILURE_FREE_FILE_MAPPING(desired_addr_r, mapping);
-            FREE_FILE_MAPPING(mapping);
-
-            libmmap__________________restore_error();
-            libmmap____ret(-ENOMEM, MAP_FAILED);
-        }
-#endif
-
-#if __cplusplus
-        libmmap_mapping_information.emplace_back(a_map);
-#else
-        if (!v_libmmap_info_vector_push(&libmmap_mapping_information, &a_map)) {
-            libmmap__________________save_error();
-
-            print_last_error("failed to reallocate section array for a mapping array", libmmap__________________last_error);
-
-            // unlock our dll array
-            LeaveCriticalSection(libmmap_mapping_information__lock);
-            free(a_map->_64_kb_sections.vec);
-            free(a_map);
-            FREE_VIRTUAL_MEMORY_AND_ON_FAILURE_FREE_FILE_MAPPING(desired_addr_r, mapping);
-            FREE_FILE_MAPPING(mapping);
-
-            libmmap__________________restore_error();
-            libmmap____ret(-ENOMEM, MAP_FAILED);
-        }
-#endif
-
-        // unlock our dll array
-        LeaveCriticalSection(libmmap_mapping_information__lock);
-
-        // pre-populate our array
-        if (prepopulate_array(a_map, mapping) == MAP_FAILED) return MAP_FAILED;
 
         // our array has been prepopulated with dummy sections, we can release the reservation
 
         // now free it
-        if (!VirtualFree(desired_addr_r, 0, MEM_RELEASE)) {
+        if (!mem.destroy()) {
             libmmap__________________save_error();
 
             print_last_error("failed to free reserved memory", libmmap__________________last_error);
 
-            // lock our dll array
-            EnterCriticalSection(libmmap_mapping_information__lock);
-#if __cplusplus
-            auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map);
-            libmmap_mapping_information.erase(it);
-#else
-            v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-            free(a_map->_64_kb_sections.vec);
-            free(a_map);
-#endif
-            // unlock our dll array
-            LeaveCriticalSection(libmmap_mapping_information__lock);
-            FREE_FILE_MAPPING(mapping);
+            if (!a_map.mapping.destroy()) {
+                libmmap__________________save_error();
+                print_last_error("failed to close mapping", libmmap__________________last_error);
+                libmmap__________________restore_error();
+                libmmap____ret(-ENOMEM, MAP_FAILED);
+            }
 
             libmmap__________________restore_error();
             libmmap____ret(-ENOMEM, MAP_FAILED);
@@ -733,206 +655,99 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         // we MUST NOT allocate anything while we are mapping to reserved
         //
 
-        // no longer needed
-        desired_addr_r = nullptr;
-
-        off_t mapping_offset = offset;
-        for (uint8_t* begin = (uint8_t*)a_map->begin_address; begin != a_map->end_address; begin += granularity) {
-            const DWORD dwMaxSizeHigh = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)0 : (DWORD)((mapping_offset >> 32) & 0xFFFFFFFFL);
-            const DWORD dwMaxSizeLow = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)mapping_offset : (DWORD)(mapping_offset & 0xFFFFFFFFL);
-
-            void * r = MapViewOfFileEx(
-                mapping
-                , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
-                , dwMaxSizeHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
-                , dwMaxSizeLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
-                , granularity // SIZE_T, length, can be anything
-                , begin // MUST be a multiple of granularity
-            );
-            if (!r) {
+        for (uint8_t* begin = (uint8_t*)a_map.begin_address; begin != a_map.end_address; begin += granularity) {
+            bool error = false;
+            auto section = a_map.mapping.find(begin);
+            if (section == nullptr) {
+                libmmap__________________save_error();
+                print_last_error("failed to find expected section in a section array for a mapping array", libmmap__________________last_error);
+                error = true;
+            }
+            else if (!section->map(prot)) {
                 libmmap__________________save_error();
                 if (ERROR_INVALID_ADDRESS == libmmap__________________last_error) {
-
                     print_last_error("failed to map a section in a section array for a mapping array due to race with another reservation/mapping", libmmap__________________last_error);
-
-                    // lock our dll array
-                    EnterCriticalSection(libmmap_mapping_information__lock);
-#if __cplusplus
-                    for (void* section : a_map->_64_kb_sections) {
-                        if (section != nullptr) {
-                            if (!UnmapViewOfFile(section)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
-                        }
-                    }
-                    auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map);
-                    libmmap_mapping_information.erase(it);
-                    delete a_map;
-#else
-                    v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-                    for (void** section = a_map->_64_kb_sections.vec; section <= &a_map->_64_kb_sections.vec[a_map->_64_kb_sections.size-1]; section++) {
-                        if (*section != nullptr) {
-                            if (!UnmapViewOfFile(*section)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
-                            *section = nullptr;
-                        }
-                    }
-                    free(a_map->_64_kb_sections.vec);
-                    free(a_map);
-#endif
-                    // unlock our dll array
-                    LeaveCriticalSection(libmmap_mapping_information__lock);
-                    FREE_FILE_MAPPING(mapping);
-
-                    libmmap__________________restore_error();
-                    break;
+                    error = true;
                 }
-                else {
-                    print_last_error("failed to map a section in a section array for a mapping array", libmmap__________________last_error);
-                    // unknown error, assume no memory
-
-                    // lock our dll array
-                    EnterCriticalSection(libmmap_mapping_information__lock);
-#if __cplusplus
-                    for (void* section : a_map->_64_kb_sections) {
-                        if (section != nullptr) {
-                            if (!UnmapViewOfFile(section)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
-                        }
-                    }
-                    auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map);
-                    libmmap_mapping_information.erase(it);
-                    delete a_map;
-#else
-                    v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-                    for (void** section = a_map->_64_kb_sections.vec; section <= &a_map->_64_kb_sections.vec[a_map->_64_kb_sections.size-1]; section++) {
-                        if (*section != nullptr) {
-                            if (!UnmapViewOfFile(*section)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
-                            *section = nullptr;
-                        }
-                    }
-                    free(a_map->_64_kb_sections.vec);
-                    free(a_map);
-#endif
-                    // unlock our dll array
-                    LeaveCriticalSection(libmmap_mapping_information__lock);
-                    FREE_FILE_MAPPING(mapping);
-
-                    libmmap__________________restore_error();
-                    libmmap____ret(-ENOMEM, MAP_FAILED);
+                else if (section->address != begin) {
+                    print_last_error("failed to map a section (in a section array for a mapping array) at expected address", libmmap__________________last_error);
+                    error = true;
                 }
             }
-            if (r != begin) {
-                libmmap__________________save_error();
-
-                print_last_error("failed to map a section (in a section array for a mapping array) at expected address", libmmap__________________last_error);
-                // lock our dll array
-                EnterCriticalSection(libmmap_mapping_information__lock);
-#if __cplusplus
-                for (void* section : a_map->_64_kb_sections) {
-                    if (section != nullptr) {
-                        if (!UnmapViewOfFile(section)) {
-                            libmmap__________________save_error();
-                            print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                        }
-                    }
+            if (error) {
+                if (!a_map.mapping.destroy()) {
+                    libmmap__________________save_error();
+                    print_last_error("failed to close mapping, continuing", libmmap__________________last_error);
+                    libmmap__________________restore_error();
                 }
-                auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map);
-                libmmap_mapping_information.erase(it);
-                delete a_map;
-#else
-                v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-                for (void** section = a_map->_64_kb_sections.vec; section <= &a_map->_64_kb_sections.vec[a_map->_64_kb_sections.size-1]; section++) {
-                    if (*section != nullptr) {
-                        if (!UnmapViewOfFile(*section)) {
-                            libmmap__________________save_error();
-                            print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                        }
-                        *section = nullptr;
-                    }
-                }
-                free(a_map->_64_kb_sections.vec);
-                free(a_map);
-#endif
-                // unlock our dll array
-                LeaveCriticalSection(libmmap_mapping_information__lock);
-                FREE_FILE_MAPPING(mapping);
 
                 libmmap__________________restore_error();
                 break;
             }
-            mapping_offset += granularity;
         }
-        if (a_map == INVALID_HANDLE_VALUE) continue;
+        if (a_map.mapping.result == INVALID_HANDLE_VALUE) continue;
 
         // we have mapped all our sections, it is safe to allocate now
-
-        size_t section_index = 0;
-        for (uint8_t* begin = (uint8_t*)a_map->begin_address; begin != a_map->end_address; begin += granularity) {
-            const DWORD dwMaxSizeHigh = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)0 : (DWORD)((mapping_offset >> 32) & 0xFFFFFFFFL);
-            const DWORD dwMaxSizeLow = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)mapping_offset : (DWORD)(mapping_offset & 0xFFFFFFFFL);
-
-            LIBMMAP_DEBUG_PRINTF("created %s section at address %p at offset %ld\n", PROT_TO_FILE_MAP_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE), begin, mapping_offset);
-            for (intptr_t ri = (intptr_t)begin; ri < (intptr_t)begin + granularity; ri += granularity) {
-                LIBMMAP_DEBUG_PRINTF("assigning section 0x%p to index %zu\n", (void*)ri, section_index);
-#if __cplusplus
-                a_map->_64_kb_sections[section_index] = (void*)ri;
-#else
-                v_libmmap_ptr_vector_atref(&a_map->_64_kb_sections, section_index)[0] = (void*)ri;
-#endif
-                section_index++;
-            }
-            mapping_offset += granularity;
-        }
-
-
+        // 
         // at this point, all our sections have been commited
 
+        // lock our dll array
+        EnterCriticalSection(libmmap_mapping_information__lock);
+
+        try {
+            libmmap_mapping_information.emplace_back(a_map);
+        }
+        catch (std::bad_alloc) {
+            libmmap__________________save_error();
+
+            print_last_error("failed to reallocate section array for a mapping array", libmmap__________________last_error);
+
+            for (auto& section : a_map.mapping._64_kb_sections) {
+                if (!section.unmap()) {
+                    libmmap__________________save_error();
+                    print_last_error("failed to unmap a section in a section array for a mapping array", libmmap__________________last_error);
+                }
+            }
+            libmmap_mapping_information.erase(std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map));
+
+            // unlock our dll array
+            LeaveCriticalSection(libmmap_mapping_information__lock);
+
+            if (!a_map.mapping.destroy()) {
+                libmmap__________________save_error();
+                print_last_error("failed to close mapping", libmmap__________________last_error);
+                libmmap__________________restore_error();
+                libmmap____ret(-ENOMEM, MAP_FAILED);
+            }
+            libmmap__________________restore_error();
+            libmmap____ret(-ENOMEM, MAP_FAILED);
+        }
+
+        // unlock our dll array
+        LeaveCriticalSection(libmmap_mapping_information__lock);
+
         if ((flags & MAP_NORESERVE) == MAP_NORESERVE) {
-            for (uint8_t* begin = (uint8_t*)a_map->begin_address; begin != a_map->end_address; begin += granularity) {
+            for (uint8_t* begin = (uint8_t*)a_map.begin_address; begin != a_map.end_address; begin += granularity) {
                 if (!VirtualLock(begin, granularity)) {
                     libmmap__________________save_error();
-
                     print_last_error("failed to lock sections (in a section array for a mapping array)", libmmap__________________last_error);
                     // lock our dll array
                     EnterCriticalSection(libmmap_mapping_information__lock);
-#if __cplusplus
-                    for (void* section : a_map->_64_kb_sections) {
-                        if (section != nullptr) {
-                            if (!UnmapViewOfFile(section)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
+                    for (auto& section : a_map.mapping._64_kb_sections) {
+                        if (!section.unmap()) {
+                            libmmap__________________save_error();
+                            print_last_error("failed to unmap a section in a section array for a mapping array", libmmap__________________last_error);
                         }
                     }
-                    auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map);
-                    libmmap_mapping_information.erase(it);
-                    delete a_map;
-#else
-                    v_libmmap_info_vector_erase(&libmmap_mapping_information, &a_map);
-                    for (void** b = a_map->_64_kb_sections.vec; b <= &a_map->_64_kb_sections.vec[a_map->_64_kb_sections.size-1]; b++) {
-                        if (*b != nullptr) {
-                            if (!UnmapViewOfFile(*b)) {
-                                libmmap__________________save_error();
-                                print_last_error("failed to unmap a section in a section array for a mapping array, continuing", libmmap__________________last_error);
-                            }
-                            *b = nullptr;
-                        }
-                    }
-                    free(a_map->_64_kb_sections.vec);
-                    free(a_map);
-#endif
+                    libmmap_mapping_information.erase(std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), a_map));
                     // unlock our dll array
                     LeaveCriticalSection(libmmap_mapping_information__lock);
-                    FREE_FILE_MAPPING(mapping);
+
+                    if (!mapping.destroy()) {
+                        libmmap__________________save_error();
+                        print_last_error("failed to close mapping, continuing", libmmap__________________last_error);
+                        libmmap__________________restore_error();
+                    }
 
                     libmmap__________________restore_error();
                     libmmap____ret(-ENOMEM, MAP_FAILED);
@@ -944,37 +759,133 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
             // prevent the compiler from optimizing this out
             if ((prot & PROT_READ) == PROT_READ) {
                 // readable
-                for (volatile uint8_t* begin = (volatile uint8_t*)a_map->begin_address; begin != (volatile uint8_t*)a_map->end_address; begin += page_size) {
+                for (volatile uint8_t* begin = (volatile uint8_t*)a_map.begin_address; begin != (volatile uint8_t*)a_map.end_address; begin += page_size) {
                     volatile uint8_t c = begin[0]; // trigger a page-fault
                 }
             }
             else if ((prot & PROT_WRITE) == PROT_WRITE) {
                 // writable but not readable
-                for (volatile uint8_t* begin = (volatile uint8_t*)a_map->begin_address; begin != (volatile uint8_t*)a_map->end_address; begin += page_size) {
+                for (volatile uint8_t* begin = (volatile uint8_t*)a_map.begin_address; begin != (volatile uint8_t*)a_map.end_address; begin += page_size) {
                     begin[0] = begin[0]; // trigger a page-fault
                 }
             }
         }
-        return a_map->begin_address;
+
+        return a_map.begin_address;
     }
 }
 
+#define LIBMMAP__TEST_OVERLAP2(space, x1, x2, y1, y2) \
+    LIBMMAP_DEBUG_PRINTF("%stesting if [%p,%p] overlaps [%p,%p] = %s\n", space, x1, x2, y1, y2, (x1 < y2 && y1 < x2) ? "true" : "false"); \
+    if (x1 < y2 && y1 < x2)
+
+int mprotect(void* addr, size_t length, int prot) {
+#if LIBMMAP_IS_DEBUG
+    if (addr == nullptr) {
+        LIBMMAP_DEBUG_PRINTF("mprotect: the passed address cannot be nullptr (NULL or 0x0)\n");
+        libmmap____ret(-EINVAL, -1);
+    }
+    if (length == 0) {
+        LIBMMAP_DEBUG_PRINTF("mprotect: the passed length cannot be zero\n");
+        libmmap____ret(-EINVAL, -1);
+    }
+    if (addr == MAP_FAILED) {
+        LIBMMAP_DEBUG_PRINTF("mprotect: the passed address cannot be MAP_FAILED\n");
+        libmmap____ret(-EINVAL, -1);
+    }
+#else
+    if (addr == nullptr || length == 0 || addr == MAP_FAILED) {
+        libmmap____ret(-EINVAL, -1);
+    }
+#endif
+
+    // PROT_NONE cannot be combined
+    if ((prot & PROT_NONE) == PROT_NONE) {
+        if (prot != PROT_NONE) {
+            LIBMMAP_DEBUG_PRINTF("mmap: PROT_NONE cannot be combined with any other PROT flags\n");
+            libmmap____ret(-EINVAL, -1);
+        }
+        // PROT_NONE
+    }
+
+    libmmap__________________init_error();
+
+    uint8_t* begin_address = (uint8_t*)rounddown((intptr_t)addr, granularity);
+    uint8_t* end_address = (uint8_t*)roundup((intptr_t)addr + length, granularity);
+    LIBMMAP_DEBUG_PRINTF("rounded address 0x%p to begin address 0x%p\n", addr, begin_address);
+    LIBMMAP_DEBUG_PRINTF("rounded address 0x%p to end address 0x%p\n", addr, end_address);
+
+    // lock our dll array
+    EnterCriticalSection(libmmap_mapping_information__lock);
+
+    LIBMMAP_DEBUG_PRINTF("starting unmap process\n");
+    LIBMMAP_DEBUG_PRINTF("  iterating %zu mappings\n", libmmap_mapping_information.size());
+    if (libmmap_mapping_information.size() != 0) {
+        for (size_t idx = libmmap_mapping_information.size() - 1; idx != -1; idx--) {
+            auto& map = libmmap_mapping_information[idx];
+            LIBMMAP_DEBUG_PRINTF("  considering the following:\n");
+            LIBMMAP_DEBUG_PRINTF("    begin address:        0x%p\n", map.begin_address);
+            LIBMMAP_DEBUG_PRINTF("    wanted begin address: 0x%p\n", begin_address);
+            LIBMMAP_DEBUG_PRINTF("    end address:          0x%p\n", map.end_address);
+            LIBMMAP_DEBUG_PRINTF("    wanted end address:   0x%p\n", end_address);
+            LIBMMAP__TEST_OVERLAP2("    - ", map.begin_address, map.end_address, begin_address, end_address) {
+                // found address range
+                // locate section that address belongs to
+                LIBMMAP_DEBUG_PRINTF("      iterating %zu sections\n", map.mapping._64_kb_sections.size());
+                if (map.mapping._64_kb_sections.size() != 0) {
+                    for (size_t idx = map.mapping._64_kb_sections.size() - 1; idx != -1; idx--) {
+                        auto& section = map.mapping._64_kb_sections[idx];
+                        uint8_t* begin_section = (uint8_t*)section.address;
+                        uint8_t* end_section = (uint8_t*)begin_section + granularity;
+                        LIBMMAP_DEBUG_PRINTF("        considering the following:\n");
+                        LIBMMAP_DEBUG_PRINTF("          begin address:        0x%p\n", begin_section);
+                        LIBMMAP_DEBUG_PRINTF("          wanted begin address: 0x%p\n", begin_address);
+                        LIBMMAP_DEBUG_PRINTF("          end address:          0x%p\n", end_section);
+                        LIBMMAP_DEBUG_PRINTF("          wanted end address:   0x%p\n", end_address);
+                        LIBMMAP__TEST_OVERLAP2("            - ", begin_section, end_section, begin_address, end_address) {
+                            LIBMMAP_DEBUG_PRINTF("              remapping section 0x%p as %s\n", begin_section, PROT_TO_PAGE_STR(prot, (section.flags & MAP_PRIVATE) == MAP_PRIVATE));
+                            // found section that address belongs to
+                            if (!section.remap(prot)) {
+                                // unlock our dll array
+                                LeaveCriticalSection(libmmap_mapping_information__lock);
+                                libmmap__________________save_error();
+                                print_last_error("failed to remap a section", libmmap__________________last_error);
+                                libmmap__________________restore_error();
+                                libmmap____ret(-EINVAL, -1);
+                            }
+                            if (begin_section == begin_address) {
+                                LIBMMAP_DEBUG_PRINTF("              wanted begin address reached\n");
+                                // munmap complete
+                                // unlock our dll array
+                                LeaveCriticalSection(libmmap_mapping_information__lock);
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+#undef TEST_OVERLAP2
+    // unlock our dll array
+    LeaveCriticalSection(libmmap_mapping_information__lock);
+
+    // partially unmapped, the requested length was not fully unmapped
+    // it is not an error if the address cannot be found
+    return 0;
+}
+
 int munmap(void* addr, size_t length) {
-    // length specifies that we must be able to split a file mapping into subsections (delete from start)
-    // for now we just unmap the entire length regardless
-    //
-    // munmap is also capable of splitting an existing mapping into two smaller mappings (separated by a gap)
-    //
 #if LIBMMAP_IS_DEBUG
     if (addr == nullptr) {
         LIBMMAP_DEBUG_PRINTF("munmap: the passed address cannot be nullptr (NULL or 0x0)\n");
         libmmap____ret(-EINVAL, -1);
     }
-    else if (length == 0) {
+    if (length == 0) {
         LIBMMAP_DEBUG_PRINTF("munmap: the passed length cannot be zero\n");
         libmmap____ret(-EINVAL, -1);
     }
-    else if (addr == MAP_FAILED) {
+    if (addr == MAP_FAILED) {
         LIBMMAP_DEBUG_PRINTF("munmap: the passed address cannot be MAP_FAILED\n");
         libmmap____ret(-EINVAL, -1);
     }
@@ -994,111 +905,59 @@ int munmap(void* addr, size_t length) {
     // lock our dll array
     EnterCriticalSection(libmmap_mapping_information__lock);
 
-#define LIBMMAP__TEST_OVERLAP2(space, x1, x2, y1, y2) \
-    LIBMMAP_DEBUG_PRINTF("%stesting if [%p,%p] overlaps [%p,%p] = %s\n", space, x1, x2, y1, y2, (x1 < y2 && y1 < x2) ? "true" : "false"); \
-    if (x1 < y2 && y1 < x2)
-
     LIBMMAP_DEBUG_PRINTF("starting unmap process\n");
-#if __cplusplus
     LIBMMAP_DEBUG_PRINTF("  iterating %zu mappings\n", libmmap_mapping_information.size());
-#else
-    LIBMMAP_DEBUG_PRINTF("  iterating %zu mappings\n", libmmap_mapping_information.size);
-#endif
-#if __cplusplus
     if (libmmap_mapping_information.size() != 0) {
-#else
-    if (libmmap_mapping_information.size != 0) {
-#endif
         bool map_done = false;
-#if __cplusplus
         for (size_t idx = libmmap_mapping_information.size() - 1; idx != -1; idx--) {
-            struct LIBMMAP__MAP_INFO** map = &libmmap_mapping_information[idx];
-#else
-        for (size_t idx = libmmap_mapping_information.size - 1; idx != -1; idx--) {
-            struct LIBMMAP__MAP_INFO** map = &libmmap_mapping_information.vec[idx];
-#endif
-            LIBMMAP_DEBUG_PRINTF("  considering map information 0x%p\n", *map);
-            if (*map != nullptr) {
-                LIBMMAP_DEBUG_PRINTF("    considering the following:\n");
-                LIBMMAP_DEBUG_PRINTF("        begin address:        0x%p\n", (**map).begin_address);
-                LIBMMAP_DEBUG_PRINTF("        wanted begin address: 0x%p\n", begin_address);
-                LIBMMAP_DEBUG_PRINTF("        end address:          0x%p\n", (**map).end_address);
-                LIBMMAP_DEBUG_PRINTF("        wanted end address:   0x%p\n", end_address);
-                LIBMMAP__TEST_OVERLAP2("        - ", (**map).begin_address, (**map).end_address, begin_address, end_address) {
-                    // found address range
-                    // locate section that address belongs to
-#if __cplusplus
-                    LIBMMAP_DEBUG_PRINTF("        iterating %zu sections\n", (**map)._64_kb_sections.size());
-#else
-                    LIBMMAP_DEBUG_PRINTF("        iterating %zu sections\n", (**map)._64_kb_sections.size);
-#endif
-#if __cplusplus
-                    if ((**map)._64_kb_sections.size() != 0) {
-#else
-                    if ((**map)._64_kb_sections.size != 0) {
-#endif
-                        bool section_done = false;
-#if __cplusplus
-                        for (size_t idx = (**map)._64_kb_sections.size() - 1; idx != -1; idx--) {
-                            void** section = &(**map)._64_kb_sections[idx];
-#else
-                        for (size_t idx = (**map)._64_kb_sections.size - 1; idx != -1; idx--) {
-                            void** section = &(**map)._64_kb_sections.vec[idx];
-#endif
-                            LIBMMAP_DEBUG_PRINTF("            considering section 0x%p\n", *section);
-                            if (*section != nullptr) {
-                                uint8_t* begin_section = (uint8_t*)*section;
-                                uint8_t* end_section = (uint8_t*)begin_section + granularity;
-                                LIBMMAP_DEBUG_PRINTF("                considering the following:\n");
-                                LIBMMAP_DEBUG_PRINTF("                    begin address:        0x%p\n", begin_section);
-                                LIBMMAP_DEBUG_PRINTF("                    wanted begin address: 0x%p\n", begin_address);
-                                LIBMMAP_DEBUG_PRINTF("                    end address:          0x%p\n", end_section);
-                                LIBMMAP_DEBUG_PRINTF("                    wanted end address:   0x%p\n", end_address);
-                                LIBMMAP__TEST_OVERLAP2("                    - ", begin_section, end_section, begin_address, end_address) {
-                                    LIBMMAP_DEBUG_PRINTF("                        unmapping section 0x%p\n", *section);
-                                    // found section that address belongs to
-                                    if (!UnmapViewOfFile(*section)) {
-                                        // unlock our dll array
-                                        LeaveCriticalSection(libmmap_mapping_information__lock);
-                                        libmmap__________________save_error();
-                                        print_last_error("failed to unmap a section", libmmap__________________last_error);
-                                        libmmap__________________restore_error();
-                                        libmmap____ret(-EINVAL, -1);
-                                    }
-                                    LIBMMAP_DEBUG_PRINTF("                        removing section 0x%p\n", *section);
-#if __cplusplus
-                                    auto it = std::find((**map)._64_kb_sections.cbegin(), (**map)._64_kb_sections.cend(), *section);
-                                    // *section = nullptr;
-                                    (**map)._64_kb_sections.erase(it);
-#else
-                                    v_libmmap_ptr_vector_erase(&(**map)._64_kb_sections, section);
-#endif
-                                    if (begin_section == begin_address) {
-                                        LIBMMAP_DEBUG_PRINTF("                        begin address reached\n");
-                                        section_done = true;
-                                        break;
-                                    }
-                                }
+            auto & map = libmmap_mapping_information[idx];
+            LIBMMAP_DEBUG_PRINTF("  considering the following:\n");
+            LIBMMAP_DEBUG_PRINTF("    begin address:        0x%p\n", map.begin_address);
+            LIBMMAP_DEBUG_PRINTF("    wanted begin address: 0x%p\n", begin_address);
+            LIBMMAP_DEBUG_PRINTF("    end address:          0x%p\n", map.end_address);
+            LIBMMAP_DEBUG_PRINTF("    wanted end address:   0x%p\n", end_address);
+            LIBMMAP__TEST_OVERLAP2("    - ", map.begin_address, map.end_address, begin_address, end_address) {
+                // found address range
+                // locate section that address belongs to
+                LIBMMAP_DEBUG_PRINTF("      iterating %zu sections\n", map.mapping._64_kb_sections.size());
+                if (map.mapping._64_kb_sections.size() != 0) {
+                    bool section_done = false;
+                    for (size_t idx = map.mapping._64_kb_sections.size() - 1; idx != -1; idx--) {
+                        auto & section = map.mapping._64_kb_sections[idx];
+                        uint8_t* begin_section = (uint8_t*)section.address;
+                        uint8_t* end_section = (uint8_t*)begin_section + granularity;
+                        LIBMMAP_DEBUG_PRINTF("        considering the following:\n");
+                        LIBMMAP_DEBUG_PRINTF("          begin address:        0x%p\n", begin_section);
+                        LIBMMAP_DEBUG_PRINTF("          wanted begin address: 0x%p\n", begin_address);
+                        LIBMMAP_DEBUG_PRINTF("          end address:          0x%p\n", end_section);
+                        LIBMMAP_DEBUG_PRINTF("          wanted end address:   0x%p\n", end_address);
+                        LIBMMAP__TEST_OVERLAP2("            - ", begin_section, end_section, begin_address, end_address) {
+                            LIBMMAP_DEBUG_PRINTF("              unmapping section 0x%p\n", begin_section);
+                            // found section that address belongs to
+                            if (!section.unmap()) {
+                                // unlock our dll array
+                                LeaveCriticalSection(libmmap_mapping_information__lock);
+                                libmmap__________________save_error();
+                                print_last_error("failed to unmap a section", libmmap__________________last_error);
+                                libmmap__________________restore_error();
+                                libmmap____ret(-EINVAL, -1);
+                            }
+                            LIBMMAP_DEBUG_PRINTF("              removing section 0x%p\n", begin_section);
+                            map.mapping._64_kb_sections.erase(std::find(map.mapping._64_kb_sections.cbegin(), map.mapping._64_kb_sections.cend(), section));
+                            if (begin_section == begin_address) {
+                                LIBMMAP_DEBUG_PRINTF("              wanted begin address reached\n");
+                                section_done = true;
+                                break;
                             }
                         }
-                        if (section_done) {
-                            map_done = true;
-                        }
+                    }
+                    if (section_done) {
+                        map_done = true;
                     }
                 }
-#if __cplusplus
-                if ((**map)._64_kb_sections.size() == 0) {
-#else
-                if ((**map)._64_kb_sections.size == 0) {
-#endif
-                    LIBMMAP_DEBUG_PRINTF("    removing map 0x%p\n", *map);
-#if __cplusplus
-                    auto it = std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), *map);
-                    // *map = nullptr;
-                    libmmap_mapping_information.erase(it);
-#else
-                    v_libmmap_ptr_vector_erase(&libmmap_mapping_information, map);
-#endif
+                if (map.mapping._64_kb_sections.size() == 0) {
+                    LIBMMAP_DEBUG_PRINTF("    removing map 0x%p\n", map.begin_address);
+                    libmmap_mapping_information.erase(std::find(libmmap_mapping_information.cbegin(), libmmap_mapping_information.cend(), map));
                 }
                 if (map_done) {
                     break;
@@ -1112,7 +971,6 @@ int munmap(void* addr, size_t length) {
             return 0;
         }
     }
-#undef TEST_OVERLAP2
     // unlock our dll array
     LeaveCriticalSection(libmmap_mapping_information__lock);
     
@@ -1120,3 +978,4 @@ int munmap(void* addr, size_t length) {
     // it is not an error if the address cannot be found
     return 0;
 }
+#undef TEST_OVERLAP2

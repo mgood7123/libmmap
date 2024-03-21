@@ -33,145 +33,59 @@ auto UnPageGuardMemory(void* address, const SIZE_T length) -> void
     printf("uninstalled PAGE_GUARD from address %p\n", address);
 }
 
-char* reason = "";
+const char* reason = "";
+const char* reason_EXPECTED = "EXPECTED ";
+const char* reason_UNEXPECTED = "UNEXPECTED ";
 
 LONG CALLBACK VectoredExceptionHandler(_EXCEPTION_POINTERS* ep)
 {
     LIBMMAP_DEBUG_PRINTF("VEH called\n");
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-        if (reason == "UNEXPECTED ") printf("%sACCESS VIOLATION at address %p\n", reason, ep->ExceptionRecord->ExceptionAddress);
+        if (reason == reason_UNEXPECTED) printf("%sACCESS VIOLATION at address %p\n", reason, ep->ExceptionRecord->ExceptionAddress);
         longjmp(restore, 1);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-#define PAGE_SHOULD_BE_MAPPED(addr, offset) \
-    LIBMMAP_DEBUG_PRINTF("testing if the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
+#define PAGE_SHOULD_BE__W(addr, offset, str1, str2, str3, page_is_unmapped__expected_value, expect_segv) \
+    LIBMMAP_DEBUG_PRINTF("testing if the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str1); \
     if (!setjmp(restore)) { \
-        reason = "UNEXPECTED "; \
+        reason = expect_segv ? reason_EXPECTED : reason_UNEXPECTED; \
         *(((uint8_t*)(addr))+(offset)) = 0; \
         page_is_unmapped = false; \
-        printf("the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
+        printf("the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str2); \
     } \
     else { \
         page_is_unmapped = true; \
-        printf("the address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
+        printf("the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str3); \
     } \
-    LIBASSERT_ASSERT_VAL(page_is_unmapped == false);
+    LIBASSERT_ASSERT_VAL(page_is_unmapped == page_is_unmapped__expected_value);
 
-#define PAGE_SHOULD_BE_UNMAPPED(addr, offset) \
-    LIBMMAP_DEBUG_PRINTF("testing if address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
+#define PAGE_SHOULD_BE__R(addr, offset, str1, str2, str3, page_is_unmapped__expected_value, expect_segv) \
+    LIBMMAP_DEBUG_PRINTF("testing if the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str1); \
     if (!setjmp(restore)) { \
-        reason = "EXPECTED "; \
-        *(((uint8_t*)(addr))+(offset)) = 0; \
-        page_is_unmapped = false; \
-        printf("the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    } \
-    else { \
-        page_is_unmapped = true; \
-        printf("the address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    } \
-    LIBASSERT_ASSERT_VAL(page_is_unmapped == true);
-
-#define PAGE_SHOULD_BE_MAPPED_r(addr, offset) \
-    LIBMMAP_DEBUG_PRINTF("testing if the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    if (!setjmp(restore)) { \
-        reason = "UNEXPECTED "; \
+        reason = expect_segv ? reason_EXPECTED : reason_UNEXPECTED; \
         volatile uint8_t value = *(((uint8_t*)(addr))+(offset)); \
         page_is_unmapped = false; \
-        printf("the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
+        printf("the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str2); \
     } \
     else { \
         page_is_unmapped = true; \
-        printf("the address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
+        printf("the address 0x%p is %s\n", (((uint8_t*)(addr))+(offset)), str3); \
     } \
-    LIBASSERT_ASSERT_VAL(page_is_unmapped == false);
+    LIBASSERT_ASSERT_VAL(page_is_unmapped == page_is_unmapped__expected_value);
 
-#define PAGE_SHOULD_BE_UNMAPPED_r(addr, offset) \
-    LIBMMAP_DEBUG_PRINTF("testing if address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    if (!setjmp(restore)) { \
-        reason = "EXPECTED "; \
-        volatile uint8_t value = *(((uint8_t*)(addr))+(offset)); \
-        page_is_unmapped = false; \
-        printf("the address 0x%p is MAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    } \
-    else { \
-        page_is_unmapped = true; \
-        printf("the address 0x%p is UNMAPPED\n", (((uint8_t*)(addr))+(offset))); \
-    } \
-    LIBASSERT_ASSERT_VAL(page_is_unmapped == true);
+#define PAGE_SHOULD_BE_READABLE(addr, offset) PAGE_SHOULD_BE__R(addr, offset, "READABLE", "READABLE", "NOT READABLE", false, false)
+#define PAGE_SHOULD_BE_WRITABLE(addr, offset) PAGE_SHOULD_BE__W(addr, offset, "WRITABLE", "WRITABLE", "WRITABLE", false, false)
 
-#define libmmap__________________last_error __________________________________________________________libmmap_________________last_error
-#define libmmap__________________last_errno __________________________________________________________libmmap_________________last_errno
+#define PAGE_SHOULD_BE_NON_READABLE(addr, offset) PAGE_SHOULD_BE__R(addr, offset, "NOT READABLE", "READABLE", "NOT READABLE", true, true)
+#define PAGE_SHOULD_BE_NON_WRITABLE(addr, offset) PAGE_SHOULD_BE__W(addr, offset, "NOT WRITABLE", "READABLE", "NOT WRITABLE", true, true)
 
+#define PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, offset) PAGE_SHOULD_BE__R(addr, offset, "MAPPED", "MAPPED", "NOT MAPPED", false, false)
+#define PAGE_SHOULD_BE_MAPPED_AND_WRITABLE(addr, offset) PAGE_SHOULD_BE__W(addr, offset, "MAPPED", "MAPPED", "NOT MAPPED", false, false)
 
-#define libmmap__________________init_error() \
-    DWORD libmmap__________________last_error = 0; \
-    int libmmap__________________last_errno = 0; \
-
-
-#define libmmap__________________save_error() \
-    libmmap__________________last_errno = errno; \
-    libmmap__________________last_error = GetLastError() \
-
-
-#define libmmap__________________restore_error() \
-    SetLastError(libmmap__________________last_error); \
-    errno = libmmap__________________last_errno
-
-static inline void print_last_error(const char* msg, DWORD dwErrorCode) {
-    LPTSTR psz = nullptr;
-    const DWORD cchMsg = FormatMessage(
-        FORMAT_MESSAGE_FROM_SYSTEM
-        | FORMAT_MESSAGE_IGNORE_INSERTS
-        | FORMAT_MESSAGE_ALLOCATE_BUFFER,
-        nullptr, // (not used with FORMAT_MESSAGE_FROM_SYSTEM)
-        dwErrorCode,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&psz,
-        0,
-        nullptr);
-    if (cchMsg > 0)
-    {
-        if (msg == nullptr) {
-            printf(
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                "    Message:  %s\n\n"
-                , dwErrorCode, psz
-            );
-        }
-        else {
-            printf(
-                "%s\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                "    Message:  %s\n\n"
-                , msg, dwErrorCode, psz
-            );
-        }
-    }
-    else
-    {
-        if (msg == nullptr) {
-            printf(
-                "  <Failed to retrieve error message string.>\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                , dwErrorCode
-            );
-        }
-        else {
-            printf(
-                "%s\n"
-                "  <Failed to retrieve error message string.>\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                , msg, dwErrorCode
-            );
-        }
-    }
-}
+#define PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, offset) PAGE_SHOULD_BE__R(addr, offset, "UNMAPPED", "NOT UNMAPPED", "UNMAPPED", true, true)
+#define PAGE_SHOULD_BE_UNMAPPED_AND_WRITABLE(addr, offset) PAGE_SHOULD_BE__W(addr, offset, "UNMAPPED", "NOT UNMAPPED", "UNMAPPED", true, true)
 
 int main()
 {
@@ -197,7 +111,7 @@ int main()
     addr = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -205,11 +119,11 @@ int main()
     r = munmap(addr, page_size);
     LIBASSERT_ASSERT_VAL(r == 0);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
     r = munmap(addr, page_size);
     LIBASSERT_ASSERT_VAL(r == 0);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -217,8 +131,8 @@ int main()
     addr = mmap(nullptr, page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -226,8 +140,8 @@ int main()
     r = munmap(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(r == 0);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -235,27 +149,27 @@ int main()
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(addr, page_size);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -263,27 +177,27 @@ int main()
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(((uint8_t*)addr) + page_size, page_size);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -291,27 +205,27 @@ int main()
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(((uint8_t*)addr) + page_size + page_size, page_size);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -319,9 +233,9 @@ int main()
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
 
-    PAGE_SHOULD_BE_MAPPED(addr, 0);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
 
 
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr))+(0)) == 0);
@@ -352,9 +266,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -369,9 +283,9 @@ int main()
 
     printf("TEST %d\n", test_number);
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_SHARED, _fileno(file), 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -421,9 +335,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -434,9 +348,9 @@ int main()
     file = fopen("test", "r");
 
     addr = mmap(nullptr, page_size * 3, PROT_READ, MAP_SHARED, _fileno(file), 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 1);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 2);
@@ -449,9 +363,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     fclose(file);
     file = nullptr;
     printf("TEST %d PASS\n", test_number);
@@ -469,9 +383,9 @@ int main()
     // file should be closable without affecting map
     fclose(file);
     file = nullptr;
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -521,9 +435,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -534,9 +448,9 @@ int main()
     // file should be closable without affecting map
     fclose(file);
     file = nullptr;
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 81);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 82);
@@ -549,9 +463,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -566,9 +480,9 @@ int main()
 
     printf("TEST %d\n", test_number);
     addr = mmap(nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE, _fileno(file), 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -618,9 +532,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -631,9 +545,9 @@ int main()
     file = fopen("test3", "r");
 
     addr = mmap(nullptr, page_size * 3, PROT_READ, MAP_PRIVATE, _fileno(file), 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -646,9 +560,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     fclose(file);
     file = nullptr;
     printf("TEST %d PASS\n", test_number);
@@ -666,9 +580,9 @@ int main()
     // file should be closable without affecting map
     fclose(file);
     file = nullptr;
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -718,9 +632,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -731,9 +645,9 @@ int main()
     // file should be closable without affecting map
     fclose(file);
     file = nullptr;
-    PAGE_SHOULD_BE_MAPPED_r(addr, 0);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size);
-    PAGE_SHOULD_BE_MAPPED_r(addr, page_size * 2);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, page_size * 2);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0)) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (0) + 1) == 5);
     LIBASSERT_ASSERT_VAL(*(((uint8_t*)(addr)) + (page_size)) == 5);
@@ -746,9 +660,9 @@ int main()
     printf("TEST %d\n", test_number);
     munmap(addr, page_size * 3);
 
-    PAGE_SHOULD_BE_UNMAPPED(addr, 0);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size);
-    PAGE_SHOULD_BE_UNMAPPED(addr, page_size * 2);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size);
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, page_size * 2);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
@@ -766,6 +680,81 @@ int main()
         remove(addr1, granularity);
         remove(((uint8_t*)addr) + granularity, granularity * 3);
     }
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    addr = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
+
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_READ);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = munmap(addr, page_size);
+    LIBASSERT_ASSERT_VAL(r == 0);
+
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+
+    printf("TEST %d\n", test_number);
+    addr = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
+
+    PAGE_SHOULD_BE_MAPPED_AND_READABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_WRITE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    // a writable page MUST be readable
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_READ);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_WRITE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    // a writable page MUST be readable
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_NONE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    PAGE_SHOULD_BE_NON_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = munmap(addr, page_size);
+    LIBASSERT_ASSERT_VAL(r == 0);
+
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
