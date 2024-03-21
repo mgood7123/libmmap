@@ -663,7 +663,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 print_last_error("failed to find expected section in a section array for a mapping array", libmmap__________________last_error);
                 error = true;
             }
-            else if (!section->map(prot)) {
+            else if (!section->remap(prot)) {
                 libmmap__________________save_error();
                 if (ERROR_INVALID_ADDRESS == libmmap__________________last_error) {
                     print_last_error("failed to map a section in a section array for a mapping array due to race with another reservation/mapping", libmmap__________________last_error);

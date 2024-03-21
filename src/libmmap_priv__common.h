@@ -81,6 +81,25 @@
 #define libmmap____ret(e, val) errno = e; return val
 
 
+struct ReservedVirtualMemory {
+    void* result = nullptr;
+    void* addr = nullptr;
+    SIZE_T length = 0;
+    inline bool create(void* addr, SIZE_T length) {
+        this->addr = addr;
+        this->length = length;
+        result = VirtualAlloc(addr, length, MEM_RESERVE, PAGE_NOACCESS);
+        return result;
+    }
+    inline bool destroy() {
+        if (result) {
+            bool r = VirtualFree(result, 0, MEM_RELEASE);
+            result = nullptr;
+            return r;
+        }
+        return true;
+    }
+};
 
 struct LIBMMAP_SECTION_INFO {
     HANDLE mapping = INVALID_HANDLE_VALUE;
@@ -90,6 +109,8 @@ struct LIBMMAP_SECTION_INFO {
     DWORD dwFileOffsetHigh = 0;
     DWORD dwFileOffsetLow = 0;
     SIZE_T length;
+    bool prepared = false;
+    ReservedVirtualMemory mem;
     libmmap__________________init_error();
 
     inline bool operator ==(const LIBMMAP_SECTION_INFO & other) const {
@@ -114,59 +135,219 @@ struct LIBMMAP_SECTION_INFO {
         this->dwFileOffsetHigh = dwFileOffsetHigh;
         this->dwFileOffsetLow = dwFileOffsetLow;
         this->length = length;
+        this->prepared = true;
         LIBMMAP_DEBUG_PRINTF("attempting to create a %s file section mapping\n", PROT_TO_FILE_MAP_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
     }
 
-    inline bool map(int prot) {
-        this->prot = prot;
-        if (prot == PROT_NONE) return true;
-        void * result = MapViewOfFileEx(
-              mapping
-            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
-            , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
-            , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
-            , length // SIZE_T, length, can be anything
-            , address // MUST be a multiple of granularity
-        );
-        libmmap__________________save_error();
-        bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
-        libmmap__________________restore_error();
-        return !e;
-    }
-
     inline bool remap(int prot) {
-        // cannot remap an unmapped address
-        if (!address) return false;
-        if (!UnmapViewOfFile(address)) return false;
-        this->prot = prot;
-        if (prot == PROT_NONE) return true;
-        void* result = MapViewOfFileEx(
-            mapping
-            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
-            , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
-            , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
-            , length // SIZE_T, length, can be anything
-            , address // MUST be a multiple of granularity
-        );
-        libmmap__________________save_error();
-        bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
-        libmmap__________________restore_error();
-        return !e;
+        if (prepared) {
+            // fast path, we previously we called prepare and should assume we are currently unmapped
+            if (prot == PROT_NONE) {
+                bool r = mem.create(address, length);
+                // we either succeeded or failed
+                if (r) {
+                    // if we succeeded, update current prot
+                    this->prepared = false;
+                    this->prot = prot;
+                }
+                return r;
+            }
+            else {
+                void * result = MapViewOfFileEx(
+                    mapping
+                    , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                    , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+                    , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+                    , length // SIZE_T, length, can be anything
+                    , address // MUST be a multiple of granularity
+                );
+                // we either succeeded or failed
+                libmmap__________________save_error();
+                bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+                libmmap__________________restore_error();
+                if (!e) {
+                    // if we succeeded, update current prot
+                    this->prepared = false;
+                    this->prot = prot;
+                }
+                return !e;
+            }
+        }
+        // slow path, we did not call prepare so we might be mapped
+        this->prepared = false;
+        if (this->prot == prot) {
+            // prot unchanged
+            return true;
+        }
+        void* result = nullptr;
+        bool r = false;
+        bool e = false;
+        if (this->prot == PROT_NONE) {
+            // current prot is none, we might have prepared it as none
+            if (mem.result) {
+                // our memory is reserved, and we are specifying a new prot, destroy and map quickly
+                if (mem.destroy()) {
+                    result = MapViewOfFileEx(
+                        mapping
+                        , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                        , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+                        , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+                        , length // SIZE_T, length, can be anything
+                        , address // MUST be a multiple of granularity
+                    );
+                    // we either succeeded or failed
+                    libmmap__________________save_error();
+                    bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+                    libmmap__________________restore_error();
+                    if (!e) {
+                        // if we succeeded, update current prot
+                        this->prot = prot;
+                    }
+                    return !e;
+                }
+                else {
+                    // we failed to destroy our reserved memory so leave prot as PROT_NONE
+                    return false;
+                }
+            }
+            else {
+                // our memory was prepared but not applied, and we are specifying a new prot
+                // since our current prot is PROT_NONE but it is currently not applied, we do not need to unmap
+                result = MapViewOfFileEx(
+                    mapping
+                    , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                    , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+                    , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+                    , length // SIZE_T, length, can be anything
+                    , address // MUST be a multiple of granularity
+                );
+                // we either succeeded or failed
+                libmmap__________________save_error();
+                bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+                libmmap__________________restore_error();
+                if (!e) {
+                    // if we succeeded, update current prot
+                    this->prot = prot;
+                }
+                return !e;
+            }
+        }
+        else {
+            // we are not prot none
+            if (address) {
+                // and we have an existing mapping
+                if (prot == PROT_NONE) {
+                    // and we want to unmap it but keep its space as reserved
+                    if (UnmapViewOfFile(address)) {
+                        // we unmapped the file, now quickly reserve its place
+                        r = mem.create(address, length);
+                        // we either succeeded or failed
+                        if (r) {
+                            // if we succeeded, update current prot
+                            this->prot = prot;
+                        }
+                        return r;
+                    }
+                    else {
+                        // we failed to unmap our file so leave prot unchanged
+                        return false;
+                    }
+                }
+                else {
+                    // and we want to keep it mapped
+                    if (UnmapViewOfFile(address)) {
+                        // we unmapped the file, now quickly remap it with a different prot
+                        result = MapViewOfFileEx(
+                            mapping
+                            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                            , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+                            , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+                            , length // SIZE_T, length, can be anything
+                            , address // MUST be a multiple of granularity
+                        );
+                        // we either succeeded or failed
+                        libmmap__________________save_error();
+                        bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+                        libmmap__________________restore_error();
+                        if (!e) {
+                            // if we succeeded, update current prot
+                            this->prot = prot;
+                        }
+                        return !e;
+                    }
+                    else {
+                        // we failed to unmap our file so leave prot unchanged
+                        return false;
+                    }
+                }
+            }
+            else {
+                // and we have no existing mapping
+                if (prot == PROT_NONE) {
+                    // and we want to reserve it
+                    r = mem.create(address, length);
+                    // we either succeeded or failed
+                    if (r) {
+                        // if we succeeded, update current prot
+                        this->prot = prot;
+                    }
+                    return r;
+                }
+                else {
+                    // and we want to map it
+                    result = MapViewOfFileEx(
+                        mapping
+                        , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                        , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
+                        , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
+                        , length // SIZE_T, length, can be anything
+                        , address // MUST be a multiple of granularity
+                    );
+                    // we either succeeded or failed
+                    libmmap__________________save_error();
+                    bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
+                    libmmap__________________restore_error();
+                    if (!e) {
+                        // if we succeeded, update current prot
+                        this->prot = prot;
+                    }
+                    return !e;
+                }
+            }
+        }
     }
 
     inline bool unmap() {
-        if (address) {
-            if (prot == PROT_NONE) {
-                address = nullptr;
-                return true;
+        if (prepared) {
+            // fast path, we previously we called prepare so we have nothing to do
+            return true;
+        }
+        // slow path, we did not call prepare so we might be mapped
+        void* result = nullptr;
+        bool r = false;
+        bool e = false;
+        if (this->prot == PROT_NONE) {
+            // current prot is none, we might have prepared it as none
+            if (mem.result) {
+                // our memory is reserved, and we are unmapping it
+                return mem.destroy();
             }
             else {
-                bool r = UnmapViewOfFile(address);
-                address = nullptr;
-                return r;
+                // and our memory was not applied yet
+                return true;
             }
         }
-        return true;
+        else {
+            // we are not prot none
+            if (address) {
+                // and we have an existing mapping and we want to unmap
+                return UnmapViewOfFile(address);
+            }
+            else {
+                // and we have no existing mapping
+                return true;
+            }
+        }
     }
 };
 
@@ -231,26 +412,6 @@ struct FileMapping {
             }
         }
         return nullptr;
-    }
-};
-
-struct ReservedVirtualMemory {
-    void* result = nullptr;
-    void* addr = nullptr;
-    SIZE_T length = 0;
-    inline bool create(void* addr, SIZE_T length) {
-        this->addr = addr;
-        this->length = length;
-        result = VirtualAlloc(addr, length, MEM_RESERVE, PAGE_NOACCESS);
-        return result;
-    }
-    inline bool destroy() {
-        if (result) {
-            bool r = VirtualFree(result, 0, MEM_RELEASE);
-            result = nullptr;
-            return r;
-        }
-        return true;
     }
 };
 

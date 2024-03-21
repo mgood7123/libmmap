@@ -16,7 +16,10 @@
 
 __BEGIN_DECLS
 
-#define _SC_PAGE_SIZE 1
+// $ grep _SC_PAGE_SIZE /usr/include/sys/*
+//   /usr/include/sys/unistd.h:# define _SC_PAGE_SIZE 3001 /* PAGE_SIZE
+#define _SC_PAGE_SIZE 3001
+#define _SC_PAGESIZE _SC_PAGE_SIZE
 #define PAGE_SIZE _SC_PAGE_SIZE
 #define PAGESIZE _SC_PAGE_SIZE
 
