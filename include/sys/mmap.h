@@ -3,6 +3,13 @@
 
 #include <sys/mmap_defines.h>
 
+// $ grep _SC_PAGE_SIZE /usr/include/sys/*
+//   /usr/include/sys/unistd.h:# define _SC_PAGE_SIZE 3001 /* PAGE_SIZE
+#define _SC_PAGE_SIZE 3001
+#define _SC_PAGESIZE _SC_PAGE_SIZE
+#define PAGE_SIZE _SC_PAGE_SIZE
+#define PAGESIZE _SC_PAGE_SIZE
+
 #ifndef __BEGIN_DECLS
 /* C++ needs to know that types and declarations are C, not C++.  */
 # ifdef	__cplusplus
@@ -15,14 +22,6 @@
 #endif
 
 __BEGIN_DECLS
-
-// $ grep _SC_PAGE_SIZE /usr/include/sys/*
-//   /usr/include/sys/unistd.h:# define _SC_PAGE_SIZE 3001 /* PAGE_SIZE
-#define _SC_PAGE_SIZE 3001
-#define _SC_PAGESIZE _SC_PAGE_SIZE
-#define PAGE_SIZE _SC_PAGE_SIZE
-#define PAGESIZE _SC_PAGE_SIZE
-
 
 /*
        The function getpagesize() returns the number of bytes in a

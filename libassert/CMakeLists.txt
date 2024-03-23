@@ -5,6 +5,12 @@ include(cmake/PreventInSourceBuilds.cmake)
 
 # ---- Initialize Project ----
 
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+
 # used to support find_package
 set(package_name "libassert")
 
@@ -163,9 +169,7 @@ if(LIBASSERT_SANITIZER_BUILD)
   add_link_options(-fsanitize=address)
 endif()
 
-if(LIBASSERT_BUILD_TESTING) # TODO: Maybe remove
-  set(LIBASSERT_USE_MAGIC_ENUM ON)
-endif()
+set(LIBASSERT_USE_MAGIC_ENUM ON)
 
 # add pre-processor definitions corresponding to CMake options
 # fixme: supposedly generator expressions should work for this

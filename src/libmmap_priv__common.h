@@ -80,6 +80,63 @@
 
 #define libmmap____ret(e, val) errno = e; return val
 
+static inline void print_last_error(const char* msg, DWORD dwErrorCode) {
+    LPTSTR psz = nullptr;
+    const DWORD cchMsg = FormatMessage(
+        FORMAT_MESSAGE_FROM_SYSTEM
+        | FORMAT_MESSAGE_IGNORE_INSERTS
+        | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+        nullptr, // (not used with FORMAT_MESSAGE_FROM_SYSTEM)
+        dwErrorCode,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)&psz,
+        0,
+        nullptr);
+    if (cchMsg > 0)
+    {
+        if (msg == nullptr) {
+            printf(
+                "  Last Error Code:\n"
+                "    Value:    %ld\n"
+                "    Message:  %s\n\n"
+                , dwErrorCode, psz
+            );
+        }
+        else {
+            printf(
+                "%s\n"
+                "  Last Error Code:\n"
+                "    Value:    %ld\n"
+                "    Message:  %s\n\n"
+                , msg, dwErrorCode, psz
+            );
+        }
+    }
+    else
+    {
+        if (msg == nullptr) {
+            printf(
+                "  <Failed to retrieve error message string.>\n"
+                "  Last Error Code:\n"
+                "    Value:    %ld\n"
+                , dwErrorCode
+            );
+        }
+        else {
+            printf(
+                "%s\n"
+                "  <Failed to retrieve error message string.>\n"
+                "  Last Error Code:\n"
+                "    Value:    %ld\n"
+                , msg, dwErrorCode
+            );
+        }
+    }
+#if LIBMMAP_IS_DEBUG
+    // abort triggers a breakpoint in the debugger
+    abort();
+#endif
+}
 
 struct ReservedVirtualMemory {
     void* result = nullptr;
@@ -101,17 +158,63 @@ struct ReservedVirtualMemory {
     }
 };
 
+struct LIBMMAP_SECTION_INFO;
+
+struct FileMapping {
+    std::vector<LIBMMAP_SECTION_INFO> _64_kb_sections;
+    HANDLE result = INVALID_HANDLE_VALUE;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    SECURITY_ATTRIBUTES fileMappingAttributes;
+    int prot = PROT_NONE;
+    int flags = 0;
+    DWORD dwMaximumSizeHigh = 0;
+    DWORD dwMaximumSizeLow = 0;
+    bool isPrivate = false;
+
+    // move only
+    FileMapping() = default;
+    FileMapping(const FileMapping& other) = delete;
+    FileMapping& operator =(const FileMapping& other) = delete;
+    FileMapping(FileMapping&& other);
+    FileMapping& operator =(FileMapping&& other);
+
+    void prepareMapping(
+        HANDLE hFile, SECURITY_ATTRIBUTES fileMappingAttributes,
+        int prot, int flags,
+        DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow
+    );
+
+    bool createMapping();
+
+    bool destroy();
+
+    bool prepareSection(
+        void* address,
+        DWORD dwFileOffsetHigh,
+        DWORD dwFileOffsetLow,
+        SIZE_T length
+    );
+
+    LIBMMAP_SECTION_INFO* find(void* address);
+};
+
 struct LIBMMAP_SECTION_INFO {
-    HANDLE mapping = INVALID_HANDLE_VALUE;
+    FileMapping* parent = nullptr;
     void* address = nullptr;
     int prot = 0;
-    int flags = 0;
     DWORD dwFileOffsetHigh = 0;
     DWORD dwFileOffsetLow = 0;
     SIZE_T length;
     bool prepared = false;
     ReservedVirtualMemory mem;
     libmmap__________________init_error();
+
+    // move only
+    LIBMMAP_SECTION_INFO() = default;
+    LIBMMAP_SECTION_INFO(const LIBMMAP_SECTION_INFO& other) = delete;
+    LIBMMAP_SECTION_INFO& operator =(const LIBMMAP_SECTION_INFO& other) = delete;
+    LIBMMAP_SECTION_INFO(LIBMMAP_SECTION_INFO&& other) = default;
+    LIBMMAP_SECTION_INFO& operator =(LIBMMAP_SECTION_INFO&& other) = default;
 
     inline bool operator ==(const LIBMMAP_SECTION_INFO & other) const {
         return other.address == address;
@@ -121,22 +224,20 @@ struct LIBMMAP_SECTION_INFO {
         return other.address != address;
     }
 
-    inline void prepare (
-        HANDLE mapping,
+    inline void prepare(
+        FileMapping* parent,
         void* address,
-        int flags,
         DWORD dwFileOffsetHigh,
         DWORD dwFileOffsetLow,
         SIZE_T length
     ) {
-        this->mapping = mapping;
+        this->parent = parent;
         this->address = address;
-        this->flags = flags;
         this->dwFileOffsetHigh = dwFileOffsetHigh;
         this->dwFileOffsetLow = dwFileOffsetLow;
         this->length = length;
         this->prepared = true;
-        LIBMMAP_DEBUG_PRINTF("attempting to create a %s file section mapping\n", PROT_TO_FILE_MAP_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
+        LIBMMAP_DEBUG_PRINTF("preparing to create a %s file section mapping\n", PROT_TO_FILE_MAP_STR(prot, parent->isPrivate));
     }
 
     inline bool remap(int prot) {
@@ -154,8 +255,8 @@ struct LIBMMAP_SECTION_INFO {
             }
             else {
                 void * result = MapViewOfFileEx(
-                    mapping
-                    , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                    parent->result
+                    , PROT_TO_FILE_MAP(prot, parent->isPrivate)
                     , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
                     , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
                     , length // SIZE_T, length, can be anything
@@ -186,10 +287,28 @@ struct LIBMMAP_SECTION_INFO {
             // current prot is none, we might have prepared it as none
             if (mem.result) {
                 // our memory is reserved, and we are specifying a new prot, destroy and map quickly
+                if (parent->result == nullptr) {
+                    // and we called mmap with PROT_NONE so no mapping was initially created, create one now
+                    if (!parent->createMapping()) {
+                        libmmap__________________save_error();
+                        print_last_error("failed to create mapping", libmmap__________________last_error);
+                        libmmap__________________restore_error();
+                        libmmap____ret(-ENOMEM, false);
+                    }
+
+                    // mapping can reuse an existing mapping, it is unclear if the returned handle is a duplicate
+                    if (libmmap__________________last_error == ERROR_ALREADY_EXISTS) {
+                        libmmap__________________save_error();
+                        print_last_error("failed to create mapping (already exists)", libmmap__________________last_error);
+                        libmmap__________________restore_error();
+                        libmmap____ret(-EEXIST, false);
+                    }
+                }
+                LIBMMAP_DEBUG_PRINTF("attempting to create a %s section mapping\n", PROT_TO_PAGE_STR(prot, parent->isPrivate));
                 if (mem.destroy()) {
                     result = MapViewOfFileEx(
-                        mapping
-                        , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                        parent->result
+                        , PROT_TO_FILE_MAP(prot, parent->isPrivate)
                         , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
                         , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
                         , length // SIZE_T, length, can be anything
@@ -211,25 +330,14 @@ struct LIBMMAP_SECTION_INFO {
                 }
             }
             else {
-                // our memory was prepared but not applied, and we are specifying a new prot
-                // since our current prot is PROT_NONE but it is currently not applied, we do not need to unmap
-                result = MapViewOfFileEx(
-                    mapping
-                    , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
-                    , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
-                    , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
-                    , length // SIZE_T, length, can be anything
-                    , address // MUST be a multiple of granularity
-                );
-                // we either succeeded or failed
-                libmmap__________________save_error();
-                bool e = !result || ERROR_INVALID_ADDRESS == libmmap__________________last_error || result != address;
-                libmmap__________________restore_error();
-                if (!e) {
-                    // if we succeeded, update current prot
-                    this->prot = prot;
-                }
-                return !e;
+                // this is now an error, the memory MUST be reserved first in order to
+                // minimize the chance of someone else claiming it before us
+                LIBMMAP_DEBUG_PRINTF("attempted to remap a %s section mapping but no memory was reserved\n", PROT_TO_PAGE_STR(prot, parent->isPrivate));
+#if LIBMMAP_IS_DEBUG
+                abort();
+#else
+                return false;
+#endif
             }
         }
         else {
@@ -258,8 +366,8 @@ struct LIBMMAP_SECTION_INFO {
                     if (UnmapViewOfFile(address)) {
                         // we unmapped the file, now quickly remap it with a different prot
                         result = MapViewOfFileEx(
-                            mapping
-                            , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                            parent->result
+                            , PROT_TO_FILE_MAP(prot, parent->isPrivate)
                             , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
                             , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
                             , length // SIZE_T, length, can be anything
@@ -296,8 +404,8 @@ struct LIBMMAP_SECTION_INFO {
                 else {
                     // and we want to map it
                     result = MapViewOfFileEx(
-                        mapping
-                        , PROT_TO_FILE_MAP(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE)
+                        parent->result
+                        , PROT_TO_FILE_MAP(prot, parent->isPrivate)
                         , dwFileOffsetHigh // DWORD, offset high, offset low + high when combined MUST be a multiple of granularity
                         , dwFileOffsetLow // DWORD, offset low, offset low + high when combined MUST be a multiple of granularity
                         , length // SIZE_T, length, can be anything
@@ -351,74 +459,128 @@ struct LIBMMAP_SECTION_INFO {
     }
 };
 
-struct FileMapping {
-    std::vector<LIBMMAP_SECTION_INFO> _64_kb_sections;
-    HANDLE result = INVALID_HANDLE_VALUE;
-    HANDLE hFile = INVALID_HANDLE_VALUE;
-    SECURITY_ATTRIBUTES fileMappingAttributes;
-    int prot = PROT_NONE;
-    int flags = 0;
-    DWORD dwMaximumSizeHigh = 0;
-    DWORD dwMaximumSizeLow = 0;
-
-    inline bool create(
-        HANDLE hFile, SECURITY_ATTRIBUTES fileMappingAttributes,
-        int prot, int flags,
-        DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow
-    ) {
-        this->hFile = hFile;
-        this->fileMappingAttributes = fileMappingAttributes;
-        this->prot = prot;
-        this->flags = flags;
-        this->dwMaximumSizeHigh = dwMaximumSizeHigh;
-        this->dwMaximumSizeLow = dwMaximumSizeLow;
-        LIBMMAP_DEBUG_PRINTF("attempting to create a %s file mapping\n", PROT_TO_PAGE_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
-        result = CreateFileMappingW(hFile, &fileMappingAttributes, PROT_TO_PAGE(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE), dwMaximumSizeHigh, dwMaximumSizeLow, NULL);
-        return result;
+inline FileMapping::FileMapping(FileMapping&& other) {
+    _64_kb_sections = std::move(other._64_kb_sections);
+    // reparent all sections
+    for (LIBMMAP_SECTION_INFO& section : _64_kb_sections) {
+        section.parent = this;
     }
+    result = std::move(other.result);
+    hFile = std::move(other.hFile);
+    fileMappingAttributes = std::move(other.fileMappingAttributes);
+    prot = std::move(other.prot);
+    flags = std::move(other.flags);
+    dwMaximumSizeHigh = std::move(other.dwMaximumSizeHigh);
+    dwMaximumSizeLow = std::move(other.dwMaximumSizeLow);
+    isPrivate = std::move(other.isPrivate);
+    
+    other._64_kb_sections = std::move(std::vector<LIBMMAP_SECTION_INFO>());
+    other.result = INVALID_HANDLE_VALUE;
+    other.hFile = INVALID_HANDLE_VALUE;
+    other.fileMappingAttributes = SECURITY_ATTRIBUTES();
+    other.prot = PROT_NONE;
+    other.flags = 0;
+    other.dwMaximumSizeHigh = 0;
+    other.dwMaximumSizeLow = 0;
+    other.isPrivate = false;
+}
 
-    inline bool destroy() {
-        if (result != INVALID_HANDLE_VALUE) {
-            bool r = CloseHandle(result);
-            result = INVALID_HANDLE_VALUE;
-            return r;
-        }
-        return true;
+inline FileMapping& FileMapping::operator =(FileMapping&& other) {
+    _64_kb_sections = std::move(other._64_kb_sections);
+    // reparent all sections
+    for (LIBMMAP_SECTION_INFO& section : _64_kb_sections) {
+        section.parent = this;
     }
+    result = std::move(other.result);
+    hFile = std::move(other.hFile);
+    fileMappingAttributes = std::move(other.fileMappingAttributes);
+    prot = std::move(other.prot);
+    flags = std::move(other.flags);
+    dwMaximumSizeHigh = std::move(other.dwMaximumSizeHigh);
+    dwMaximumSizeLow = std::move(other.dwMaximumSizeLow);
+    isPrivate = std::move(other.isPrivate);
 
-    inline bool prepare(
-        HANDLE mapping,
-        void* address,
-        int flags,
-        DWORD dwFileOffsetHigh,
-        DWORD dwFileOffsetLow,
-        SIZE_T length
-    ) {
-        LIBMMAP_SECTION_INFO section;
-        section.prepare(mapping, address, flags, dwFileOffsetHigh, dwFileOffsetLow, length);
-        try {
-            _64_kb_sections.emplace_back(section);
-        }
-        catch (std::bad_alloc) {
-            return false;
-        }
-        return true;
-    }
+    other._64_kb_sections = std::move(std::vector<LIBMMAP_SECTION_INFO>());
+    other.result = INVALID_HANDLE_VALUE;
+    other.hFile = INVALID_HANDLE_VALUE;
+    other.fileMappingAttributes = SECURITY_ATTRIBUTES();
+    other.prot = PROT_NONE;
+    other.flags = 0;
+    other.dwMaximumSizeHigh = 0;
+    other.dwMaximumSizeLow = 0;
+    other.isPrivate = false;
+    return *this;
+}
 
-    inline LIBMMAP_SECTION_INFO * find(void* address) {
-        for (LIBMMAP_SECTION_INFO& s : _64_kb_sections) {
-            if (s.address == address) {
-                return &s;
-            }
-        }
-        return nullptr;
+inline void FileMapping::prepareMapping(
+    HANDLE hFile, SECURITY_ATTRIBUTES fileMappingAttributes,
+    int prot, int flags,
+    DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow
+) {
+    this->hFile = hFile;
+    this->fileMappingAttributes = fileMappingAttributes;
+    this->prot = prot;
+    this->flags = flags;
+    this->dwMaximumSizeHigh = dwMaximumSizeHigh;
+    this->dwMaximumSizeLow = dwMaximumSizeLow;
+    this->isPrivate = (flags & MAP_PRIVATE) == MAP_PRIVATE;
+    LIBMMAP_DEBUG_PRINTF("preparing to create a %s file mapping\n", PROT_TO_PAGE_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
+}
+
+inline bool FileMapping::createMapping() {
+    LIBMMAP_DEBUG_PRINTF("attempting to create a %s file mapping\n", PROT_TO_PAGE_STR(prot, (flags & MAP_PRIVATE) == MAP_PRIVATE));
+    result = CreateFileMappingW(hFile, &fileMappingAttributes, PROT_TO_PAGE(prot, isPrivate), dwMaximumSizeHigh, dwMaximumSizeLow, NULL);
+    return result;
+}
+
+inline bool FileMapping::destroy() {
+    if (result != INVALID_HANDLE_VALUE) {
+        bool r = CloseHandle(result);
+        result = INVALID_HANDLE_VALUE;
+        return r;
     }
-};
+    return true;
+}
+
+inline bool FileMapping::prepareSection(
+    void* address,
+    DWORD dwFileOffsetHigh,
+    DWORD dwFileOffsetLow,
+    SIZE_T length
+) {
+    LIBMMAP_SECTION_INFO section;
+    section.prepare(this, address, dwFileOffsetHigh, dwFileOffsetLow, length);
+    try {
+        // avoid moving the section until after we have possibly reallocated
+        _64_kb_sections.emplace_back(std::move(LIBMMAP_SECTION_INFO()));
+        _64_kb_sections.back() = std::move(section);
+    }
+    catch (std::bad_alloc) {
+        return false;
+    }
+    return true;
+}
+
+inline LIBMMAP_SECTION_INFO * FileMapping::find(void* address) {
+    for (LIBMMAP_SECTION_INFO& s : _64_kb_sections) {
+        if (s.address == address) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
 
 struct LIBMMAP__MAP_INFO {
     FileMapping mapping;
     void* begin_address;
     void* end_address;
+
+    // move only
+    LIBMMAP__MAP_INFO() = default;
+    LIBMMAP__MAP_INFO(const LIBMMAP__MAP_INFO& other) = delete;
+    LIBMMAP__MAP_INFO& operator =(const LIBMMAP__MAP_INFO& other) = delete;
+    LIBMMAP__MAP_INFO(LIBMMAP__MAP_INFO&& other) = default;
+    LIBMMAP__MAP_INFO& operator =(LIBMMAP__MAP_INFO&& other) = default;
 
     inline bool operator ==(const LIBMMAP__MAP_INFO& other) const {
         return other.begin_address == begin_address;

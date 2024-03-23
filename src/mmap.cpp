@@ -36,72 +36,18 @@ BOOL CALLBACK InitHandleFunction(
     return TRUE;
 }
 
-static inline void print_last_error(const char* msg, DWORD dwErrorCode) {
-    LPTSTR psz = nullptr;
-    const DWORD cchMsg = FormatMessage(
-          FORMAT_MESSAGE_FROM_SYSTEM
-        | FORMAT_MESSAGE_IGNORE_INSERTS
-        | FORMAT_MESSAGE_ALLOCATE_BUFFER,
-        nullptr, // (not used with FORMAT_MESSAGE_FROM_SYSTEM)
-        dwErrorCode,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&psz,
-        0,
-        nullptr);
-    if (cchMsg > 0)
-    {
-        if (msg == nullptr) {
-            printf(
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                "    Message:  %s\n\n"
-                , dwErrorCode, psz
-            );
-        }
-        else {
-            printf(
-                "%s\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                "    Message:  %s\n\n"
-                , msg, dwErrorCode, psz
-            );
-        }
-    }
-    else
-    {
-        if (msg == nullptr) {
-            printf(
-                "  <Failed to retrieve error message string.>\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                , dwErrorCode
-            );
-        }
-        else {
-            printf(
-                "%s\n"
-                "  <Failed to retrieve error message string.>\n"
-                "  Last Error Code:\n"
-                "    Value:    %ld\n"
-                , msg, dwErrorCode
-            );
-        }
-    }
-}
-
 inline bool prepopulate_array(LIBMMAP__MAP_INFO & a_map, off_t offset) {
     LIBMMAP_DEBUG_PRINTF("mmap: preparing to map range [0x%p-0x%p]\n", a_map.begin_address, a_map.end_address);
     for (uint8_t* begin = (uint8_t*)a_map.begin_address; begin != a_map.end_address; begin += granularity) {
         const DWORD dwFileOffsetHigh = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)0 : (DWORD)((offset >> 32) & 0xFFFFFFFFL);
         const DWORD dwFileOffsetLow = (sizeof(off_t) <= sizeof(DWORD)) ? (DWORD)offset : (DWORD)(offset & 0xFFFFFFFFL);
 
-        LIBMMAP_DEBUG_PRINTF("mmap: preparing to map 0x%p\n", begin);
-        if (!a_map.mapping.prepare(a_map.mapping.result, begin, a_map.mapping.flags, dwFileOffsetHigh, dwFileOffsetLow, granularity)) {
-            LIBMMAP_DEBUG_PRINTF("mmap: failed to prepare to map 0x%p\n", begin);
+        LIBMMAP_DEBUG_PRINTF("mmap: preparing to map section 0x%p\n", begin);
+        if (!a_map.mapping.prepareSection(begin, dwFileOffsetHigh, dwFileOffsetLow, granularity)) {
+            LIBMMAP_DEBUG_PRINTF("mmap: failed to prepare to map section 0x%p\n", begin);
             return false;
         }
-        LIBMMAP_DEBUG_PRINTF("mmap: prepared to map 0x%p\n", begin);
+        LIBMMAP_DEBUG_PRINTF("mmap: prepared to map section 0x%p\n", begin);
         offset += granularity;
     }
     LIBMMAP_DEBUG_PRINTF("mmap: prepared to map range [0x%p-0x%p]\n", a_map.begin_address, a_map.end_address);
@@ -534,18 +480,31 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
 
     libmmap__________________init_error();
 
+    FileMapping mapping;
     // we assume mmap pointers cannot be inherited
     SECURITY_ATTRIBUTES a;
     a.bInheritHandle = false;
     a.nLength = 0;
     a.lpSecurityDescriptor = nullptr;
-    FileMapping mapping;
-    if (!mapping.create(
-        handle,
-        a,
-        prot, flags,
-        dwMaxSizeHigh, dwMaxSizeLow
-    )) {
+    // file handle MUST be closable after mmap returns
+    if ((prot & PROT_NONE) == PROT_NONE) {
+        // we are PROT_NONE, we cannot map a handle as NOACCESS so instead map it as read only
+        mapping.prepareMapping(
+            handle,
+            a,
+            PROT_READ, flags,
+            dwMaxSizeHigh, dwMaxSizeLow
+        );
+    }
+    else {
+        mapping.prepareMapping(
+            handle,
+            a,
+            prot, flags,
+            dwMaxSizeHigh, dwMaxSizeLow
+        );
+    }
+    if (!mapping.createMapping()) {
         libmmap__________________save_error();
         print_last_error("failed to create mapping", libmmap__________________last_error);
         libmmap__________________restore_error();
@@ -599,6 +558,8 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
 
         // our array has been created if-needed
 
+        // we must not optimize these
+        volatile bool failed = false;
         LIBMMAP__MAP_INFO a_map;
 
         a_map.mapping = std::move(mapping);
@@ -631,7 +592,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
             libmmap____ret(-ENOMEM, MAP_FAILED);
         }
 
-        // our array has been prepopulated with dummy sections, we can release the reservation
+        // our array has been prepopulated with dummy sections
 
         // now free it
         if (!mem.destroy()) {
@@ -682,10 +643,11 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 }
 
                 libmmap__________________restore_error();
+                failed = true;
                 break;
             }
         }
-        if (a_map.mapping.result == INVALID_HANDLE_VALUE) continue;
+        if (failed) continue;
 
         // we have mapped all our sections, it is safe to allocate now
         // 
@@ -695,7 +657,9 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         EnterCriticalSection(libmmap_mapping_information__lock);
 
         try {
-            libmmap_mapping_information.emplace_back(a_map);
+            // avoid moving the a_map until after we have possibly reallocated
+            libmmap_mapping_information.emplace_back(std::move(LIBMMAP__MAP_INFO()));
+            libmmap_mapping_information.back() = std::move(a_map);
         }
         catch (std::bad_alloc) {
             libmmap__________________save_error();
@@ -843,7 +807,7 @@ int mprotect(void* addr, size_t length, int prot) {
                         LIBMMAP_DEBUG_PRINTF("          end address:          0x%p\n", end_section);
                         LIBMMAP_DEBUG_PRINTF("          wanted end address:   0x%p\n", end_address);
                         LIBMMAP__TEST_OVERLAP2("            - ", begin_section, end_section, begin_address, end_address) {
-                            LIBMMAP_DEBUG_PRINTF("              remapping section 0x%p as %s\n", begin_section, PROT_TO_PAGE_STR(prot, (section.flags & MAP_PRIVATE) == MAP_PRIVATE));
+                            LIBMMAP_DEBUG_PRINTF("              remapping section 0x%p as %s\n", begin_section, PROT_TO_PAGE_STR(prot, section.parent->isPrivate));
                             // found section that address belongs to
                             if (!section.remap(prot)) {
                                 // unlock our dll array

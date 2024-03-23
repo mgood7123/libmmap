@@ -758,6 +758,72 @@ int main()
     printf("TEST %d PASS\n", test_number);
     test_number++;
 
+    printf("TEST %d\n", test_number);
+    addr = mmap(nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
+    PAGE_SHOULD_BE_NON_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = munmap(addr, page_size);
+    LIBASSERT_ASSERT_VAL(r == 0);
+
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    addr = mmap(nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    LIBASSERT_ASSERT_VAL(addr != MAP_FAILED);
+    PAGE_SHOULD_BE_NON_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_WRITE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    // a writable page MUST be readable
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_READ);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_WRITE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    // a writable page MUST be readable
+    PAGE_SHOULD_BE_READABLE(addr, 0);
+    PAGE_SHOULD_BE_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = mprotect(addr, page_size, PROT_NONE);
+    LIBASSERT_ASSERT_VAL(r == 0);
+    PAGE_SHOULD_BE_NON_READABLE(addr, 0);
+    PAGE_SHOULD_BE_NON_WRITABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
+    printf("TEST %d\n", test_number);
+    r = munmap(addr, page_size);
+    LIBASSERT_ASSERT_VAL(r == 0);
+
+    PAGE_SHOULD_BE_UNMAPPED_AND_READABLE(addr, 0);
+    printf("TEST %d PASS\n", test_number);
+    test_number++;
+
     printf("tests complete\n");
 
     return 0;
